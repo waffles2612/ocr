@@ -66,7 +66,7 @@ with st.sidebar:
 
     model = st.selectbox("Vision model", [
         "meta-llama/llama-4-scout-17b-16e-instruct",
-        "meta-llama/llama-4-maverick-17b-128e-instruct",
+        "llama-3.3-70b-versatile",
     ])
 
     lang = st.selectbox("OCR language", ["eng", "hin", "fra", "deu", "spa"], index=0)
