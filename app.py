@@ -60,7 +60,7 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("🔍 OCR vs Image LLM Comparison")
+st.title("OCR vs Image LLM Comparison")
 st.caption("Upload an image, run OCR, then ask questions — compare answers from raw image vs OCR text.")
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
