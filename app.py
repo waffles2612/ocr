@@ -56,7 +56,6 @@ def get_gemini_key():
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="OCR vs Image LLM Tester",
-    page_icon="🔍",
     layout="wide",
 )
 
