@@ -32,7 +32,7 @@ except ImportError:
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 VISION_MODEL       = "meta-llama/llama-4-scout-17b-16e-instruct"
-JUDGE_MODEL        = "llama-3.3-70b-versatile"
+JUDGE_MODEL        = "meta-llama/llama-4-maverick-17b-128e-instruct"
 GROQ_URL           = "https://api.groq.com/openai/v1/chat/completions"
 JUDGE_GEMINI_MODEL = "gemini-2.5-flash"
 
