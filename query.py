@@ -34,7 +34,7 @@ except ImportError:
 VISION_MODEL       = "meta-llama/llama-4-scout-17b-16e-instruct"
 JUDGE_MODEL        = "llama-3.3-70b-versatile"
 GROQ_URL           = "https://api.groq.com/openai/v1/chat/completions"
-JUDGE_GEMINI_MODEL = "gemini-2.0-flash"
+JUDGE_GEMINI_MODEL = "gemini-2.5-flash"
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 

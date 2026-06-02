@@ -69,8 +69,10 @@ with st.sidebar:
 
     model = st.selectbox("Vision model", [
         "meta-llama/llama-4-scout-17b-16e-instruct",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
+        "gemini-3.5-flash",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-pro",
     ])
 
     if is_gemini(model):
