@@ -26,7 +26,8 @@ except ImportError as e:
     print("Run: pip install pytesseract pillow")
     sys.exit(1)
 
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+if sys.platform == "win32":
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 
 def run_ocr(image_path: str, lang: str = "eng") -> dict:
