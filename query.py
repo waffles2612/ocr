@@ -31,11 +31,33 @@ except ImportError:
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
-JUDGE_MODEL  = "llama-3.3-70b-versatile"
-GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
+VISION_MODEL       = "meta-llama/llama-4-scout-17b-16e-instruct"
+JUDGE_MODEL        = "llama-3.3-70b-versatile"
+GROQ_URL           = "https://api.groq.com/openai/v1/chat/completions"
+JUDGE_GEMINI_MODEL = "gemini-2.0-flash"
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
+def is_gemini(model: str) -> bool:
+    return model.startswith("gemini")
+
+
+def call_gemini(content, model: str, api_key: str) -> dict:
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        return {"text": None, "latency_ms": 0, "error": "google-generativeai not installed"}
+    genai.configure(api_key=api_key)
+    client = genai.GenerativeModel(model)
+    start = time.time()
+    try:
+        response = client.generate_content(content)
+        elapsed = round((time.time() - start) * 1000)
+        return {"text": response.text.strip(), "latency_ms": elapsed, "error": None}
+    except Exception as e:
+        elapsed = round((time.time() - start) * 1000)
+        return {"text": None, "latency_ms": elapsed, "error": str(e)}
+
 
 def upload_image(image_path: str) -> str:
     print("  Uploading image to get public URL...")
@@ -92,7 +114,7 @@ def call_groq(messages: list, model: str) -> dict:
         return {"text": None, "latency_ms": elapsed, "error": str(e)}
 
 
-def judge_answers(query: str, img_answer: str, ocr_answer: str) -> dict:
+def judge_answers(query: str, img_answer: str, ocr_answer: str, gemini_key: str = None) -> dict:
     prompt = f"""You are a strict answer comparison judge.
 
 Question: {query}
@@ -105,7 +127,10 @@ Are these two answers semantically equivalent? Consider them equivalent if they 
 Reply in this exact JSON format with no extra text:
 {{"verdict": "MATCH" or "MISMATCH", "reason": "one sentence explanation"}}"""
 
-    result = call_groq([{"role": "user", "content": prompt}], model=JUDGE_MODEL)
+    if gemini_key:
+        result = call_gemini(prompt, JUDGE_GEMINI_MODEL, gemini_key)
+    else:
+        result = call_groq([{"role": "user", "content": prompt}], model=JUDGE_MODEL)
     if result["error"]:
         return {"verdict": "ERROR", "reason": result["error"]}
     try:

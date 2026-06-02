@@ -2,3 +2,4 @@ streamlit
 pytesseract
 pillow
 requests
+google-generativeai

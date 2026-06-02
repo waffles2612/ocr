@@ -30,9 +30,9 @@ except ImportError as e:
 
 from ocr import run_ocr
 from visualize_ocr import draw_boxes
-from query import call_groq, judge_answers, upload_image, VISION_MODEL, JUDGE_MODEL
+from query import call_groq, call_gemini, is_gemini, judge_answers, upload_image, VISION_MODEL, JUDGE_MODEL
 
-# ── API key (Streamlit secrets → config.py fallback) ─────────────────────────
+# ── API keys (Streamlit secrets → config.py fallback) ────────────────────────
 def get_api_key():
     try:
         return st.secrets["API_KEY"]
@@ -41,6 +41,16 @@ def get_api_key():
             from config import API_KEY
             return API_KEY
         except ImportError:
+            return None
+
+def get_gemini_key():
+    try:
+        return st.secrets["GEMINI_API_KEY"]
+    except Exception:
+        try:
+            from config import GEMINI_API_KEY
+            return GEMINI_API_KEY
+        except (ImportError, NameError):
             return None
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -57,16 +67,28 @@ st.caption("Upload an image, run OCR, then ask questions — compare answers fro
 with st.sidebar:
     st.header("Settings")
 
-    api_key = get_api_key()
-    if not api_key:
-        api_key = st.text_input("Groq API Key", type="password",
-                                placeholder="gsk_...")
-        if not api_key:
-            st.warning("Enter your Groq API key to continue.")
-
     model = st.selectbox("Vision model", [
         "meta-llama/llama-4-scout-17b-16e-instruct",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
     ])
+
+    if is_gemini(model):
+        api_key = None
+        gemini_key = get_gemini_key()
+        if not gemini_key:
+            gemini_key = st.text_input("Gemini API Key", type="password",
+                                       placeholder="AIza...")
+            if not gemini_key:
+                st.warning("Enter your Gemini API key to continue.")
+    else:
+        gemini_key = None
+        api_key = get_api_key()
+        if not api_key:
+            api_key = st.text_input("Groq API Key", type="password",
+                                    placeholder="gsk_...")
+            if not api_key:
+                st.warning("Enter your Groq API key to continue.")
 
     lang = st.selectbox("OCR language", ["eng", "hin", "fra", "deu", "spa"], index=0)
     min_conf = st.slider("Min bbox confidence", 0, 100, 40,
@@ -124,43 +146,60 @@ if st.session_state.ocr_data:
 
     query = st.text_input("Your question", placeholder="What is the total amount?")
 
-    if st.button("▶ Run Query", type="primary", disabled=not (query and api_key)):
+    active_key = gemini_key if is_gemini(model) else api_key
+    if st.button("▶ Run Query", type="primary", disabled=not (query and active_key)):
         ocr_data = st.session_state.ocr_data
         tmp_path  = ocr_data["_tmp_path"]
         ocr_text  = ocr_data["plain_text"]
 
-        import query as qmod
-        qmod.API_KEY = api_key  # inject key at runtime
+        if is_gemini(model):
+            with st.spinner("Querying with image..."):
+                from PIL import Image as PILImage
+                pil_img = PILImage.open(tmp_path)
+                img_result = call_gemini([pil_img, query], model, gemini_key)
+                image_url = None
 
-        with st.spinner("Uploading image..."):
-            image_url = None
-            try:
-                image_url = upload_image(tmp_path)
-            except Exception as e:
-                st.warning(f"Image upload failed ({e}) — image mode will be skipped.")
+            with st.spinner("Querying with OCR text..."):
+                ocr_prompt = (
+                    f"The following text was extracted via OCR from an image:\n\n"
+                    f"{ocr_text}\n\nUsing only this text, answer:\n{query}"
+                )
+                ocr_result = call_gemini(ocr_prompt, model, gemini_key)
 
-        with st.spinner("Querying with image..."):
-            if image_url:
-                img_messages = [{"role": "user", "content": [
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": query},
-                ]}]
-                img_result = call_groq(img_messages, model)
-            else:
-                img_result = {"text": None, "latency_ms": 0, "error": "Skipped (upload failed)"}
+        else:
+            import query as qmod
+            qmod.API_KEY = api_key
 
-        with st.spinner("Querying with OCR text..."):
-            ocr_messages = [{"role": "user", "content": (
-                f"The following text was extracted via OCR from an image:\n\n"
-                f"{ocr_text}\n\nUsing only this text, answer:\n{query}"
-            )}]
-            ocr_result = call_groq(ocr_messages, model)
+            with st.spinner("Uploading image..."):
+                image_url = None
+                try:
+                    image_url = upload_image(tmp_path)
+                except Exception as e:
+                    st.warning(f"Image upload failed ({e}) — image mode will be skipped.")
+
+            with st.spinner("Querying with image..."):
+                if image_url:
+                    img_messages = [{"role": "user", "content": [
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                        {"type": "text", "text": query},
+                    ]}]
+                    img_result = call_groq(img_messages, model)
+                else:
+                    img_result = {"text": None, "latency_ms": 0, "error": "Skipped (upload failed)"}
+
+            with st.spinner("Querying with OCR text..."):
+                ocr_messages = [{"role": "user", "content": (
+                    f"The following text was extracted via OCR from an image:\n\n"
+                    f"{ocr_text}\n\nUsing only this text, answer:\n{query}"
+                )}]
+                ocr_result = call_groq(ocr_messages, model)
 
         with st.spinner("Judging answers..."):
             if img_result.get("error") or ocr_result.get("error"):
                 judgment = {"verdict": "SKIP", "reason": "One or both answers errored out"}
             else:
-                judgment = judge_answers(query, img_result["text"], ocr_result["text"])
+                judgment = judge_answers(query, img_result["text"], ocr_result["text"],
+                                         gemini_key=gemini_key)
 
         img_ms = img_result["latency_ms"]
         ocr_ms = ocr_result["latency_ms"]
