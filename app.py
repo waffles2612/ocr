@@ -2,7 +2,9 @@
 Streamlit UI — OCR vs Image LLM Comparison Tool
 """
 
+import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -17,17 +19,14 @@ if sys.platform == "win32" and _tess_dir not in os.environ.get("PATH", ""):
 
 try:
     import pytesseract
-    from PIL import Image
-    import requests
-    if sys.platform == "win32":
-        pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-except ImportError as e:
-    st.error(f"Missing dependency: {e}. Run: pip install pytesseract pillow requests")
+except ImportError:
+    st.error("Missing dependency: pytesseract. Run: pip install pytesseract pillow")
     st.stop()
 
 from ocr import run_ocr
 from visualize_ocr import draw_boxes
-from query import call_groq, call_gemini, call_github, is_gemini, is_github, image_to_data_url, VISION_MODEL  # judge_answers, JUDGE_MODEL commented out
+
+from query import call_groq, call_gemini, call_github, is_gemini, is_github, image_to_data_url
 
 # ── API keys (Streamlit secrets → config.py fallback) ────────────────────────
 def get_api_key():
@@ -154,6 +153,36 @@ if uploaded:
 
         st.success(f"OCR done — {ocr_data['word_count']} words extracted.")
 
+def parse_llm_json(text: str) -> dict:
+    """Extract {answer, quote} from an LLM response that should be JSON."""
+    cleaned = re.sub(r"```(?:json)?\s*", "", text).strip("`").strip()
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        m = re.search(r"\{.*\}", cleaned, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group())
+            except Exception:
+                pass
+    return {"answer": text, "quote": None}
+
+
+
+def _ocr_prompt(ocr_text: str, context: str, bbox_context: str, query: str) -> str:
+    return (
+        f"The following text was extracted via OCR from an image:\n\n"
+        f"{ocr_text}\n\n"
+        f"Nearby words around \"{context}\" (with positions):\n{bbox_context}\n\n"
+        f"Using only this text, answer the question below.\n"
+        f"Respond ONLY with a JSON object — no extra text:\n"
+        f'{{"answer": "your answer", "bbox": {{"x": <left>, "y": <top>, "width": <w>, "height": <h>}} }}\n'
+        f"bbox must be the bounding box of the word(s) in the position data above that contain the answer "
+        f"(compute the union rectangle if multiple words). Set bbox to null if the answer is not in the position data.\n\n"
+        f"Question: {query}"
+    )
+
+
 def get_neighboring_words(words: list, context: str, radius: int = 150) -> list:
     context_lower = context.lower()
     anchors = [w for w in words if context_lower in w["text"].lower()]
@@ -197,13 +226,7 @@ if st.session_state.ocr_data:
                 img_result = call_gemini([pil_img, query], model, gemini_key)
 
             with st.spinner("Querying with OCR text..."):
-                ocr_prompt = (
-                    f"The following text was extracted via OCR from an image:\n\n"
-                    f"{ocr_text}\n\n"
-                    f"Nearby words around \"{context}\" (with positions):\n{bbox_context}\n\n"
-                    f"Using only this text, answer:\n{query}"
-                )
-                ocr_result = call_gemini(ocr_prompt, model, gemini_key)
+                ocr_result = call_gemini(_ocr_prompt(ocr_text, context, bbox_context, query), model, gemini_key)
 
         elif is_github(model):
             import query as qmod
@@ -218,12 +241,7 @@ if st.session_state.ocr_data:
                 img_result = call_github(img_messages, model)
 
             with st.spinner("Querying with OCR text..."):
-                ocr_messages = [{"role": "user", "content": (
-                    f"The following text was extracted via OCR from an image:\n\n"
-                    f"{ocr_text}\n\n"
-                    f"Nearby words around \"{context}\" (with positions):\n{bbox_context}\n\n"
-                    f"Using only this text, answer:\n{query}"
-                )}]
+                ocr_messages = [{"role": "user", "content": _ocr_prompt(ocr_text, context, bbox_context, query)}]
                 ocr_result = call_github(ocr_messages, model)
 
         else:
@@ -239,21 +257,29 @@ if st.session_state.ocr_data:
                 img_result = call_groq(img_messages, model)
 
             with st.spinner("Querying with OCR text..."):
-                ocr_messages = [{"role": "user", "content": (
-                    f"The following text was extracted via OCR from an image:\n\n"
-                    f"{ocr_text}\n\n"
-                    f"Nearby words around \"{context}\" (with positions):\n{bbox_context}\n\n"
-                    f"Using only this text, answer:\n{query}"
-                )}]
+                ocr_messages = [{"role": "user", "content": _ocr_prompt(ocr_text, context, bbox_context, query)}]
                 ocr_result = call_groq(ocr_messages, model)
 
         img_ms = img_result["latency_ms"]
         ocr_ms = ocr_result["latency_ms"]
 
+        img_answer = img_result.get("text") or ""
+
+        # OCR mode: LLM has the coordinates in context and returns bbox directly
+        ocr_parsed  = parse_llm_json(ocr_result.get("text") or "")
+        ocr_answer  = ocr_parsed.get("answer") or ocr_result.get("text") or ""
+        raw_ocr_bbox = ocr_parsed.get("bbox") if not ocr_result.get("error") else None
+        ocr_bbox = raw_ocr_bbox if (
+            isinstance(raw_ocr_bbox, dict)
+            and all(k in raw_ocr_bbox for k in ("x", "y", "width", "height"))
+        ) else None
+
         st.session_state.results = {
             "img_result": img_result,
             "ocr_result": ocr_result,
-           
+            "img_answer": img_answer,
+            "ocr_answer": ocr_answer,
+            "ocr_bbox":   ocr_bbox,
             "img_ms":     img_ms,
             "ocr_ms":     ocr_ms,
         }
@@ -270,7 +296,7 @@ if st.session_state.ocr_data:
             if r["img_result"]["error"]:
                 st.error(r["img_result"]["error"])
             else:
-                st.success(r["img_result"]["text"])
+                st.success(r["img_answer"])
             st.caption(f"Latency: {r['img_ms']:,} ms")
 
         with c2:
@@ -278,7 +304,12 @@ if st.session_state.ocr_data:
             if r["ocr_result"]["error"]:
                 st.error(r["ocr_result"]["error"])
             else:
-                st.info(r["ocr_result"]["text"])
+                st.info(r["ocr_answer"])
             st.caption(f"Latency: {r['ocr_ms']:,} ms")
 
-        
+        # ── Answer location (OCR mode only) ──────────────────────────────────
+        ocr_bbox = r.get("ocr_bbox")
+        if ocr_bbox:
+            b = ocr_bbox
+            st.caption(f"bbox — x:{b['x']} y:{b['y']} w:{b['width']} h:{b['height']}")
+
