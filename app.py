@@ -2,16 +2,13 @@
 Streamlit UI — OCR vs Image LLM Comparison Tool
 """
 
-import csv
-import io
-import json
 import os
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 import streamlit as st
+
 
 # ── Tesseract path (Windows local; ignored on Linux/Streamlit Cloud) ──────────
 _tess_dir = r"C:\Program Files\Tesseract-OCR"
@@ -30,7 +27,7 @@ except ImportError as e:
 
 from ocr import run_ocr
 from visualize_ocr import draw_boxes
-from query import call_groq, call_gemini, is_gemini, judge_answers, upload_image, VISION_MODEL, JUDGE_MODEL
+from query import call_groq, call_gemini, call_github, is_gemini, is_github, image_to_data_url, VISION_MODEL  # judge_answers, JUDGE_MODEL commented out
 
 # ── API keys (Streamlit secrets → config.py fallback) ────────────────────────
 def get_api_key():
@@ -53,14 +50,24 @@ def get_gemini_key():
         except (ImportError, NameError):
             return None
 
+def get_github_token():
+    try:
+        return st.secrets["GITHUB_TOKEN"]
+    except Exception:
+        try:
+            from config import GITHUB_TOKEN
+            return GITHUB_TOKEN
+        except (ImportError, NameError):
+            return None
+
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="OCR vs Image LLM Tester",
+    page_title="OCR vs Image Tester",
     layout="wide",
 )
 
 st.title("OCR vs Image LLM Comparison")
-st.caption("Upload an image, run OCR, then ask questions — compare answers from raw image vs OCR text.")
+st.caption("Upload an image, run OCR, then ask questions ")
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -72,18 +79,30 @@ with st.sidebar:
         "gemini-2.5-flash",
         "gemini-2.5-flash-lite",
         "gemini-2.5-pro",
+        "gpt-4o-mini",
     ])
 
     if is_gemini(model):
         api_key = None
+        github_token = None
         gemini_key = get_gemini_key()
         if not gemini_key:
             gemini_key = st.text_input("Gemini API Key", type="password",
                                        placeholder="AIza...")
             if not gemini_key:
                 st.warning("Enter your Gemini API key to continue.")
+    elif is_github(model):
+        api_key = None
+        gemini_key = None
+        github_token = get_github_token()
+        if not github_token:
+            github_token = st.text_input("GitHub Token", type="password",
+                                         placeholder="ghp_...")
+            if not github_token:
+                st.warning("Enter your GitHub token to continue.")
     else:
         gemini_key = None
+        github_token = None
         api_key = get_api_key()
         if not api_key:
             api_key = st.text_input("Groq API Key", type="password",
@@ -91,18 +110,13 @@ with st.sidebar:
             if not api_key:
                 st.warning("Enter your Groq API key to continue.")
 
-    lang = st.selectbox("OCR language", ["eng", "hin", "fra", "deu", "spa"], index=0)
-    min_conf = st.slider("Min bbox confidence", 0, 100, 40,
-                         help="Hide OCR words below this confidence from the annotated image")
-
-    st.divider()
-    st.caption("Color guide for bboxes:")
-    st.markdown("🟢 High conf (≥ 80%)  \n🟠 Medium (50–79%)  \n🔴 Low (< 50%)")
+    min_conf = 0
 
 # ── Session state ─────────────────────────────────────────────────────────────
 for key in ("ocr_data", "annotated_img", "results"):
     if key not in st.session_state:
         st.session_state[key] = None
+
 
 # ── Step 1: Upload & OCR ──────────────────────────────────────────────────────
 st.header("Step 1 — Upload Image & Run OCR")
@@ -120,9 +134,9 @@ if uploaded:
         st.subheader("Original image")
         st.image(tmp_path, use_container_width=True)
 
-    if st.button("▶ Run OCR", type="primary"):
+    if st.button("Run OCR", type="primary"):
         with st.spinner("Running Tesseract..."):
-            ocr_data = run_ocr(tmp_path, lang=lang)
+            ocr_data = run_ocr(tmp_path)
             ocr_data["_tmp_path"] = tmp_path
             st.session_state.ocr_data = ocr_data
             ann_img, _ = draw_boxes(tmp_path, ocr_data["words"], min_conf=min_conf)
@@ -140,149 +154,131 @@ if uploaded:
 
         st.success(f"OCR done — {ocr_data['word_count']} words extracted.")
 
+def get_neighboring_words(words: list, context: str, radius: int = 150) -> list:
+    context_lower = context.lower()
+    anchors = [w for w in words if context_lower in w["text"].lower()]
+    if not anchors:
+        return words  # fallback: return all words if context not found
+    cx = sum(w["left"] + w["width"] // 2 for w in anchors) / len(anchors)
+    cy = sum(w["top"]  + w["height"] // 2 for w in anchors) / len(anchors)
+    return [
+        w for w in words
+        if abs((w["left"] + w["width"] // 2) - cx) <= radius
+        and abs((w["top"]  + w["height"] // 2) - cy) <= radius
+    ]
+
+
 # ── Step 2: Query ─────────────────────────────────────────────────────────────
 if st.session_state.ocr_data:
     st.divider()
     st.header("Step 2 — Ask a Question")
 
-    query = st.text_input("Your question", placeholder="What is the total amount?")
+    query   = st.text_input("Your question", placeholder="What is the total amount?")
+    context = st.text_input("Context", placeholder="e.g. Total, Invoice No, Date")
 
-    active_key = gemini_key if is_gemini(model) else api_key
-    if st.button("▶ Run Query", type="primary", disabled=not (query and active_key)):
+    active_key = gemini_key if is_gemini(model) else (github_token if is_github(model) else api_key)
+    if st.button("Run Query", type="primary", disabled=not (query and context.strip() and active_key)):
         ocr_data = st.session_state.ocr_data
         tmp_path  = ocr_data["_tmp_path"]
         ocr_text  = ocr_data["plain_text"]
+
+        neighbors = get_neighboring_words(ocr_data["words"], context)
+        bbox_lines = [
+            f"[block {w['block_num']}, line {w['line_num']}] \"{w['text']}\" "
+            f"at ({w['left']}, {w['top']}) size {w['width']}x{w['height']}"
+            for w in neighbors
+        ]
+        bbox_context = "\n".join(bbox_lines)
 
         if is_gemini(model):
             with st.spinner("Querying with image..."):
                 from PIL import Image as PILImage
                 pil_img = PILImage.open(tmp_path)
                 img_result = call_gemini([pil_img, query], model, gemini_key)
-                image_url = None
 
             with st.spinner("Querying with OCR text..."):
                 ocr_prompt = (
                     f"The following text was extracted via OCR from an image:\n\n"
-                    f"{ocr_text}\n\nUsing only this text, answer:\n{query}"
+                    f"{ocr_text}\n\n"
+                    f"Nearby words around \"{context}\" (with positions):\n{bbox_context}\n\n"
+                    f"Using only this text, answer:\n{query}"
                 )
                 ocr_result = call_gemini(ocr_prompt, model, gemini_key)
+
+        elif is_github(model):
+            import query as qmod
+            qmod.GITHUB_TOKEN = github_token
+
+            with st.spinner("Querying with image..."):
+                data_url = image_to_data_url(tmp_path)
+                img_messages = [{"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                    {"type": "text", "text": query},
+                ]}]
+                img_result = call_github(img_messages, model)
+
+            with st.spinner("Querying with OCR text..."):
+                ocr_messages = [{"role": "user", "content": (
+                    f"The following text was extracted via OCR from an image:\n\n"
+                    f"{ocr_text}\n\n"
+                    f"Nearby words around \"{context}\" (with positions):\n{bbox_context}\n\n"
+                    f"Using only this text, answer:\n{query}"
+                )}]
+                ocr_result = call_github(ocr_messages, model)
 
         else:
             import query as qmod
             qmod.API_KEY = api_key
 
-            with st.spinner("Uploading image..."):
-                image_url = None
-                try:
-                    image_url = upload_image(tmp_path)
-                except Exception as e:
-                    st.warning(f"Image upload failed ({e}) — image mode will be skipped.")
-
             with st.spinner("Querying with image..."):
-                if image_url:
-                    img_messages = [{"role": "user", "content": [
-                        {"type": "image_url", "image_url": {"url": image_url}},
-                        {"type": "text", "text": query},
-                    ]}]
-                    img_result = call_groq(img_messages, model)
-                else:
-                    img_result = {"text": None, "latency_ms": 0, "error": "Skipped (upload failed)"}
+                data_url = image_to_data_url(tmp_path)
+                img_messages = [{"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                    {"type": "text", "text": query},
+                ]}]
+                img_result = call_groq(img_messages, model)
 
             with st.spinner("Querying with OCR text..."):
                 ocr_messages = [{"role": "user", "content": (
                     f"The following text was extracted via OCR from an image:\n\n"
-                    f"{ocr_text}\n\nUsing only this text, answer:\n{query}"
+                    f"{ocr_text}\n\n"
+                    f"Nearby words around \"{context}\" (with positions):\n{bbox_context}\n\n"
+                    f"Using only this text, answer:\n{query}"
                 )}]
                 ocr_result = call_groq(ocr_messages, model)
 
-        with st.spinner("Judging answers..."):
-            if img_result.get("error") or ocr_result.get("error"):
-                judgment = {"verdict": "SKIP", "reason": "One or both answers errored out"}
-            else:
-                judgment = judge_answers(query, img_result["text"], ocr_result["text"],
-                                         gemini_key=gemini_key)
-
         img_ms = img_result["latency_ms"]
         ocr_ms = ocr_result["latency_ms"]
-        faster = "Image" if img_ms < ocr_ms else "OCR text"
 
-        row = {
-            "timestamp":          time.strftime("%Y-%m-%d %H:%M:%S"),
-            "model":              model,
-            "image":              ocr_data["image"],
-            "image_url":          image_url or "",
-            "query":              query,
-            "ocr_extracted_text": ocr_text,
-            "image_answer":       img_result.get("text") or "",
-            "image_latency_ms":   img_ms,
-            "image_error":        img_result.get("error") or "",
-            "ocr_answer":         ocr_result.get("text") or "",
-            "ocr_latency_ms":     ocr_ms,
-            "ocr_error":          ocr_result.get("error") or "",
-            "faster_mode":        faster,
-            "delta_ms":           abs(img_ms - ocr_ms),
-            "verdict":            judgment["verdict"],
-            "verdict_reason":     judgment["reason"],
+        st.session_state.results = {
+            "img_result": img_result,
+            "ocr_result": ocr_result,
+           
+            "img_ms":     img_ms,
+            "ocr_ms":     ocr_ms,
         }
-
-        if st.session_state.results is None:
-            st.session_state.results = []
-        st.session_state.results.append(row)
 
     # ── Display latest result ─────────────────────────────────────────────────
     if st.session_state.results:
-        row = st.session_state.results[-1]
+        r = st.session_state.results
 
         st.subheader("Results")
         c1, c2 = st.columns(2)
 
         with c1:
             st.markdown("**IMAGE mode**")
-            if row["image_error"]:
-                st.error(row["image_error"])
+            if r["img_result"]["error"]:
+                st.error(r["img_result"]["error"])
             else:
-                st.success(row["image_answer"])
-            st.caption(f"Latency: {row['image_latency_ms']:,} ms")
+                st.success(r["img_result"]["text"])
+            st.caption(f"Latency: {r['img_ms']:,} ms")
 
         with c2:
             st.markdown("**OCR TEXT mode**")
-            if row["ocr_error"]:
-                st.error(row["ocr_error"])
+            if r["ocr_result"]["error"]:
+                st.error(r["ocr_result"]["error"])
             else:
-                st.info(row["ocr_answer"])
-            st.caption(f"Latency: {row['ocr_latency_ms']:,} ms")
+                st.info(r["ocr_result"]["text"])
+            st.caption(f"Latency: {r['ocr_ms']:,} ms")
 
-        verdict = row["verdict"]
-        if verdict == "MATCH":
-            st.success(f"✅ MATCH — {row['verdict_reason']}")
-        elif verdict == "MISMATCH":
-            st.error(f"❌ MISMATCH — {row['verdict_reason']}")
-        else:
-            st.warning(f"⚠️ {verdict} — {row['verdict_reason']}")
-
-# ── Step 3: Download CSV ──────────────────────────────────────────────────────
-if st.session_state.results:
-    st.divider()
-    st.header("Step 3 — Download Results")
-
-    fieldnames = [
-        "timestamp", "model", "image", "image_url", "query",
-        "ocr_extracted_text",
-        "image_answer", "image_latency_ms", "image_error",
-        "ocr_answer", "ocr_latency_ms", "ocr_error",
-        "faster_mode", "delta_ms", "verdict", "verdict_reason",
-    ]
-
-    buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=fieldnames)
-    writer.writeheader()
-    writer.writerows(st.session_state.results)
-
-    st.download_button(
-        "⬇ Download CSV",
-        data=buf.getvalue().encode("utf-8"),
-        file_name="results.csv",
-        mime="text/csv",
-    )
-
-    st.dataframe(st.session_state.results, use_container_width=True)
+        
